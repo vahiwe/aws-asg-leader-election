@@ -1,0 +1,205 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: |
+  EventBridge-Lambda.yaml
+  This template creates a Lambda function that listens for events from EventBridge
+  and invokes a Lambda function.
+
+Resources:
+  ScalingEventBridgeRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "BeanstalkScalingEventBridgeRule-${AWS::Region}"
+      Description: "Rule for scaling event in elastic beanstalk"
+      EventPattern: 
+        source: 
+          - "aws.autoscaling"
+        detail-type: 
+          - "EC2 Instance Launch Successful"
+          - "EC2 Instance Terminate Successful" 
+          - "EC2 Instance Launch Unsuccessful" 
+          - "EC2 Instance Terminate Unsuccessful" 
+          - "EC2 Instance-launch Lifecycle Action" 
+          - "EC2 Instance-terminate Lifecycle Action"
+        detail: 
+          AutoScalingGroupName: 
+            - prefix: "awseb-"
+      State: "ENABLED"
+      Targets:
+        - Arn: 
+            Fn::GetAtt: 
+            - "ASGLeaderSelectionLambdaFunction"
+            - "Arn"
+          Id: ASGLeaderSelectionLambdaFunction
+
+  PermissionForEventsToInvokeLambdaRebuild: 
+    Type: AWS::Lambda::Permission
+    Properties: 
+      FunctionName: !Ref "ASGLeaderSelectionLambdaFunction"
+      Action: "lambda:InvokeFunction"
+      Principal: "events.amazonaws.com"
+      SourceArn: 
+        Fn::GetAtt: 
+          - "ScalingEventBridgeRule"
+          - "Arn"
+  
+  ASGLeaderSelectionLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "BeanstalkASGLeaderSelection-${AWS::Region}"
+      Code:
+        ZipFile: |
+          console.log('Loading ElectASGLeader');
+
+          var aws = require('aws-sdk');
+          var autoscaling = new aws.AutoScaling();
+          var ec2 = new aws.EC2();
+
+          var validStates  = [ 'Pending', 'Pending:Wait', 'Pending:Proceed', 'InService' ];
+          var leaderTagKey   = 'app:isLeader';
+          var leaderTagValue = 'true';
+
+          exports.handler = function(event, context) {
+            console.log('Received event:');
+            
+            console.log( "eventbridge scaling event :" );
+            
+            console.log(event);
+
+            let json = event.detail;
+
+            //list all instances currently in the autoscaling group
+            autoscaling.describeAutoScalingGroups( { 'AutoScalingGroupNames' : [json.AutoScalingGroupName] }, function(err, data) {
+              if( err ) {
+                console.log( 'Error loading autoscaling groups: ', err );
+                context.fail();
+                return;
+              }
+              
+              console.log("autoscalingGroupName: ", json.AutoScalingGroupName);
+
+              var asg = data.AutoScalingGroups.pop();
+              var candidates = [];
+              var allInstanceIds = [];
+
+              asg.Instances.forEach( function( instance ) {
+                allInstanceIds.push( instance.InstanceId );
+                if( validStates.indexOf( instance.LifecycleState ) >= 0 ) {
+                  candidates.push( instance.InstanceId );
+                  console.log( 'Instance ' + instance.InstanceId + ' is a candidate for leader.' );
+                }
+              } );
+
+              ec2.describeInstances( { 'InstanceIds' : candidates }, function(err, data) {
+                if( err ) {
+                  console.log( 'Error loading autoscaling groups: ', err );
+                  context.fail();
+                  return;
+                }
+
+                var leaders = [];
+                var newLeader = null;
+
+                //find all leader instances
+                data.Reservations.forEach( function( reservation ) {
+                  reservation.Instances.forEach( function( instance ) {
+                    instance.Tags.forEach( function( tag ) {
+                      if( tag.Key == leaderTagKey ) {
+                        leaders.push( instance );
+                      }
+                    });
+                  });
+                });
+
+                // Get leaders  instance ids
+                var leaderInstanceIds = leaders.map(leader => leader.InstanceId);
+
+                console.log("leader candidates: ", candidates);
+                console.log("leaders: ", leaderInstanceIds);
+              
+                //if there's already a leader, don't change anything.
+                if( leaders.length == 1 ) {
+                  console.log( 'Retaining leader instance ' + leaderInstanceIds[0] );
+                  context.succeed( leaders[0] );
+                  return;
+
+                  // if there is more than one leader, keep one of them.
+                } else if( leaders.length > 1 ) {
+                  newLeader = leaderInstanceIds[0];
+
+                  // if there are no leaders and the triggering instance is coming online, make it the leader.
+                } else if( json.Description.includes("Launching a new EC2 instance:")) {
+                  newLeader = json.EC2InstanceId;
+
+                  //Otherwise, just pick a leader.
+                } else {
+                  newLeader = candidates[0];
+                }
+
+                //flip the tags on all instances.
+                ec2.deleteTags( { 'Resources': allInstanceIds, 'Tags': [ { 'Key': leaderTagKey } ] }, function(err, data) {
+                  if( err ) {
+                    console.log( 'Error deleting tags from non-candidate instances: ', err );
+                    context.fail();
+                    return;
+                  }
+
+                  console.log( 'Cleared tags on ' + allInstanceIds.length + ' insances' );
+
+                  var params = {
+                    'Resources': [newLeader],
+                    'Tags': [ { 'Key': leaderTagKey, 'Value': leaderTagValue } ]
+                  };
+                  ec2.createTags( params, function() {
+                    if( err ) {
+                      console.log( 'Error creating leader tag on leader instance: ', err );
+                      context.fail();
+                      return;
+                    }
+
+                    console.log( 'Successfully tagged new leader instance', newLeader );
+                    context.succeed( newLeader );
+                  } )
+                });
+
+
+              });
+
+            });
+          };
+      Handler: index.handler
+      Role: !GetAtt LambdaRole.Arn
+      Runtime: nodejs16.x
+      Timeout: 30
+      
+  LambdaRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      Policies:
+        - PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "ec2:*Tags"
+                  - "ec2:Describe*"
+                  - "ec2:DescribeAvailabilityZones"
+                  - "ec2:DescribeInstances"
+                  - "autoscaling:DescribeAutoScalingGroups"
+                  - "autoscaling:DescribeAutoScalingInstances"
+                  - "autoscaling:DescribeTags"
+                  - "s3:ListMyBuckets"
+                Resource:
+                  - '*'
+          PolicyName: !Sub "BeanstalkScalingEventBridgeRuleLambdaPolicy-${AWS::Region}"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      
