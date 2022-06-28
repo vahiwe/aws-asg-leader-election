@@ -12,13 +12,11 @@ exports.handler = function(event, context) {
   console.log('Received event:');
   console.log(event);
 
-  var data = event.Records[0].Sns;
+  var eventData = event.Records[0].Sns;
 
-  console.log( "SNS Message:", data );
+  console.log( "SNS Message:", eventData );
 
-  leader = null,
-  json = JSON.parse(data.Message)
-  ;
+  let json = JSON.parse(eventData.Message);
 
   //list all instances currently in the autoscaling group
   autoscaling.describeAutoScalingGroups( { 'AutoScalingGroupNames' : [json.AutoScalingGroupName] }, function(err, data) {
@@ -40,7 +38,7 @@ exports.handler = function(event, context) {
       }
     } );
 
-    ec2.describeInstances( { 'InstanceIds' : candidates }, function(err, data) {
+    ec2.describeInstances( { 'InstanceIds' : candidates }, function(err, res) {
       if( err ) {
         console.log( 'Error loading autoscaling groups: ', err );
         context.fail();
@@ -51,7 +49,7 @@ exports.handler = function(event, context) {
       var newLeader = null;
 
       //find all leader instances
-      data.Reservations.forEach( function( reservation ) {
+      res.Reservations.forEach( function( reservation ) {
         reservation.Instances.forEach( function( instance ) {
           instance.Tags.forEach( function( tag ) {
             if( tag.Key == leaderTagKey ) {
@@ -73,7 +71,7 @@ exports.handler = function(event, context) {
 
         // if there are no leaders and the triggering instance is coming online, make it the leader.
       } else if( json.Event == 'autoscaling:EC2_INSTANCE_LAUNCH' ) {
-        newLeader = json.EC2InstanceId
+        newLeader = json.EC2InstanceId;
 
         //Otherwise, just pick a leader.
       } else {
@@ -81,7 +79,7 @@ exports.handler = function(event, context) {
       }
 
       //flip the tags on all instances.
-      ec2.deleteTags( { 'Resources': allInstanceIds, 'Tags': [ { 'Key': leaderTagKey } ] }, function(err, data) {
+      ec2.deleteTags( { 'Resources': allInstanceIds, 'Tags': [ { 'Key': leaderTagKey } ] }, function(err, _) {
         if( err ) {
           console.log( 'Error deleting tags from non-candidate instances: ', err );
           context.fail();
@@ -103,7 +101,7 @@ exports.handler = function(event, context) {
 
           console.log( 'Successfully tagged new leader instance' );
           context.succeed( newLeader );
-        } )
+        } );
       });
 
 

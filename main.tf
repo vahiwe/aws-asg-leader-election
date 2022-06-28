@@ -3,28 +3,34 @@
 # group.  Scaling events will trigger leader election, insuring there is always one
 # leader whenever instances are added or removed.
 
+provider "aws" {
+  region = "us-east-1"
+}
+resource "aws_sns_topic" "leader_sns_topic" {
+  name = "leader-election-topic"
+}
+
 resource "aws_lambda_function" "leader" {
   function_name = "${var.name}"
   description = "Elects a leader in an autoscaling upon receiving scaling events"
-  runtime = "nodejs"
+  runtime = "nodejs16.x"
   filename = "${path.module}/files/ElectASGLeader.zip"
-  source_code_hash = "${base64sha256(file("${path.module}/files/ElectASGLeader.zip"))}"
-  handler = "exports.handler"
+  source_code_hash = "${filebase64sha256("${path.module}/files/ElectASGLeader.zip")}"
+  handler = "ElectASGLeader.handler"
   role = "${aws_iam_role.lambda.arn}"
   timeout = "30"
-  runtime = "nodejs4.3"
 }
 
 resource "aws_lambda_permission" "sns" {
     statement_id = "AllowExecutionFromSNS"
     action = "lambda:InvokeFunction"
     function_name = "${aws_lambda_function.leader.arn}"
-    principal = "sns.amazonaws.com"
-    source_arn = "${var.asg_event_topic_arn}"
+    principal = "sns.amazonaws.com" 
+    source_arn = "${aws_sns_topic.leader_sns_topic.arn}"
 }
 
 resource "aws_sns_topic_subscription" "leader" {
-    topic_arn = "${var.asg_event_topic_arn}"
+    topic_arn = "${aws_sns_topic.leader_sns_topic.arn}"
     protocol = "lambda"
     endpoint = "${aws_lambda_function.leader.arn}"
 }
