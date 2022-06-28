@@ -10,15 +10,12 @@ var leaderTagValue = 'true';
 
 exports.handler = function(event, context) {
   console.log('Received event:');
+  
+  console.log( "eventbridge scaling event :" );
+  
   console.log(event);
 
-  var data = event.Records[0].Sns;
-
-  console.log( "SNS Message:", data );
-
-  leader = null,
-  json = JSON.parse(data.Message)
-  ;
+  let json = event.detail;
 
   //list all instances currently in the autoscaling group
   autoscaling.describeAutoScalingGroups( { 'AutoScalingGroupNames' : [json.AutoScalingGroupName] }, function(err, data) {
@@ -27,6 +24,8 @@ exports.handler = function(event, context) {
       context.fail();
       return;
     }
+    
+    console.log("autoscalingGroupName: ", json.AutoScalingGroupName);
 
     var asg = data.AutoScalingGroups.pop();
     var candidates = [];
@@ -61,19 +60,25 @@ exports.handler = function(event, context) {
         });
       });
 
+      // Get leaders  instance ids
+      var leaderInstanceIds = leaders.map(leader => leader.InstanceId);
+
+      console.log("leader candidates: ", candidates);
+      console.log("leaders: ", leaderInstanceIds);
+    
       //if there's already a leader, don't change anything.
       if( leaders.length == 1 ) {
-        console.log( 'Retaining leader instance ' + leaders[0] );
+        console.log( 'Retaining leader instance ' + leaderInstanceIds[0] );
         context.succeed( leaders[0] );
         return;
 
         // if there is more than one leader, keep one of them.
       } else if( leaders.length > 1 ) {
-        newLeader = leaders[0];
+        newLeader = leaderInstanceIds[0];
 
         // if there are no leaders and the triggering instance is coming online, make it the leader.
-      } else if( json.Event == 'autoscaling:EC2_INSTANCE_LAUNCH' ) {
-        newLeader = json.EC2InstanceId
+      } else if( json.Description.includes("Launching a new EC2 instance:")) {
+        newLeader = json.EC2InstanceId;
 
         //Otherwise, just pick a leader.
       } else {
@@ -101,7 +106,7 @@ exports.handler = function(event, context) {
             return;
           }
 
-          console.log( 'Successfully tagged new leader instance' );
+          console.log( 'Successfully tagged new leader instance', newLeader );
           context.succeed( newLeader );
         } )
       });
